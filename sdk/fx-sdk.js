@@ -1133,8 +1133,10 @@ function createRuntime(options) {
       let content;
       if (typeof value === "string") {
         content = encoder.encode(value);
-      } else if (ArrayBuffer.isView(value)) {
-        content = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      } else if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+        content = value instanceof ArrayBuffer
+          ? new Uint8Array(value)
+          : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
         try {
           strictDecoder.decode(content);
         } catch {

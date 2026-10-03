@@ -587,10 +587,20 @@ fn loadRuleWithBudget(
     };
 }
 
-/// Bytes requested from a host: enough for the line-safe prefix plus one
-/// UTF-8 sequence, matching the filesystem loader's prefix read.
-fn hostRuleReadLength(limit: context_limits.Resolved) usize {
+/// Bytes a loader reads for one rule: the line-safe prefix plus one UTF-8 sequence.
+fn ruleReadLength(limit: context_limits.Resolved) usize {
     return @min(limit.effectiveBytes() +| 3, context_limits.emergency_ceiling_bytes);
+}
+
+/// The model-visible body of a rule whose first bytes are `prefix`. Borrows `prefix`.
+fn ruleBody(prefix: []const u8, observed_bytes: usize, limit: context_limits.Resolved) RuleLoad {
+    const prefix_len = context_limits.lineSafePrefixLength(prefix, limit.effectiveBytes());
+    const trimmed = std.mem.trim(u8, prefix[0..prefix_len], trim_chars);
+    return .{ .body = .{ .text = trimmed, .observed_bytes = observed_bytes } };
+}
+
+fn hostReadLength(limit: context_limits.Resolved, max_read_bytes: usize) usize {
+    return @min(ruleReadLength(limit), max_read_bytes);
 }
 
 fn loadHostRule(
@@ -600,7 +610,7 @@ fn loadHostRule(
     limit: context_limits.Resolved,
     work_budget: ?*ReconstructionBudget,
 ) Allocator.Error!RuleLoad {
-    const read_len = hostRuleReadLength(limit);
+    const read_len = hostReadLength(limit, reader.max_read_bytes);
     // Reserve the bounded read before it happens; the host cannot report size first.
     if (work_budget) |budget| {
         if (!budget.admit_reads(read_len, 0)) return .{ .omitted = .oversized };
@@ -612,18 +622,18 @@ fn loadHostRule(
         error.Unreadable => .{ .omitted = .unreadable },
     };
     const file = read orelse return .missing;
-    return classifyHostRule(file, read_len, limit);
+    return classifyHostRule(file, limit, reader.max_read_bytes);
 }
 
 /// Applies the filesystem loader's size, encoding, and prefix rules to bytes a
 /// host delivered. The result borrows `file.bytes`.
-fn classifyHostRule(file: context_contract.InstructionFile, read_len: usize, limit: context_limits.Resolved) RuleLoad {
+fn classifyHostRule(file: context_contract.InstructionFile, limit: context_limits.Resolved, max_read_bytes: usize) RuleLoad {
     if (file.total_bytes > context_limits.emergency_ceiling_bytes) return .{ .omitted = .oversized };
     const observed_bytes: usize = @intCast(file.total_bytes);
-    const expected_len = @min(observed_bytes, read_len);
-    if (file.bytes.len > expected_len) return .{ .omitted = .unreadable };
-    // A host that bounds reads below the requested prefix cannot deliver the rule.
-    if (file.bytes.len < expected_len) return .{ .omitted = .oversized };
+    const read_len = hostReadLength(limit, max_read_bytes);
+    if (file.bytes.len != @min(observed_bytes, read_len)) return .{ .omitted = .unreadable };
+    // A host bound below the rule's prefix would otherwise truncate it silently.
+    if (observed_bytes > read_len and read_len < ruleReadLength(limit)) return .{ .omitted = .oversized };
 
     var validator: text_utils.IncrementalUtf8Validator = .{};
     validator.append(file.bytes) catch return .{ .omitted = .unreadable };
@@ -632,10 +642,7 @@ fn classifyHostRule(file: context_contract.InstructionFile, read_len: usize, lim
     // Unread bytes past the prefix count as content, as the filesystem loader
     // would see them while validating the whole file.
     if (complete and std.mem.trim(u8, file.bytes, trim_chars).len == 0) return .blank;
-
-    const prefix_len = context_limits.lineSafePrefixLength(file.bytes, limit.effectiveBytes());
-    const trimmed = std.mem.trim(u8, file.bytes[0..prefix_len], trim_chars);
-    return .{ .body = .{ .text = trimmed, .observed_bytes = observed_bytes } };
+    return ruleBody(file.bytes, observed_bytes, limit);
 }
 
 fn loadFilesystemRule(
@@ -697,10 +704,7 @@ fn loadFilesystemRule(
     const observed_bytes = std.math.cast(usize, opened_stat.size) orelse return .{ .omitted = .oversized };
     if (observed_bytes > context_limits.emergency_ceiling_bytes) return .{ .omitted = .oversized };
 
-    const read_len = @min(
-        observed_bytes,
-        @min(limit.effectiveBytes() +| 3, context_limits.emergency_ceiling_bytes),
-    );
+    const read_len = @min(observed_bytes, ruleReadLength(limit));
     if (work_budget) |budget| {
         if (!budget.admit_reads(observed_bytes, read_len)) return .{ .omitted = .oversized };
     }
@@ -711,9 +715,7 @@ fn loadFilesystemRule(
     const bytes_read = file.readPositionalAll(io_mod.getIo(), content, 0) catch
         return .{ .omitted = .unreadable };
     if (bytes_read != read_len) return .{ .omitted = .unreadable };
-    const prefix_len = context_limits.lineSafePrefixLength(content, limit.effectiveBytes());
-    const trimmed = std.mem.trim(u8, content[0..prefix_len], trim_chars);
-    return .{ .body = .{ .text = trimmed, .observed_bytes = observed_bytes } };
+    return ruleBody(content, observed_bytes, limit);
 }
 
 fn validateRuleUtf8(file: *std.Io.File, byte_count: usize) !bool {
@@ -1849,7 +1851,7 @@ const FakeInstructionHost = struct {
     var reads: usize = 0;
     var last_max_bytes: usize = 0;
 
-    const reader = context_contract.InstructionFileReader{ .read_fn = read };
+    const reader = context_contract.InstructionFileReader{ .read_fn = read, .max_read_bytes = std.math.maxInt(usize) };
     const instruction_files = context_contract.InstructionFiles{ .host = .{
         .home = "/home/visitor",
         .reader = reader,
@@ -1901,7 +1903,7 @@ test "host instruction files deliver global and project rules from host paths" {
     try std.testing.expectEqualStrings("/home/visitor/.fx/AGENTS.md", context.delivered_sources[0]);
     try std.testing.expectEqualStrings("/workspace/AGENTS.md", context.delivered_sources[1]);
     try std.testing.expectEqual(@as(usize, 0), context.notices.len);
-    try std.testing.expectEqual(hostRuleReadLength((context_limits.Values{}).project_instruction_file_bytes), FakeInstructionHost.last_max_bytes);
+    try std.testing.expectEqual(ruleReadLength((context_limits.Values{}).project_instruction_file_bytes), FakeInstructionHost.last_max_bytes);
 }
 
 test "host instruction files stay silent when no rule exists" {
@@ -2033,6 +2035,29 @@ test "host instruction reads reserve reconstruction budget before reading" {
     try std.testing.expectEqual(context_contract.OmissionReason.oversized, scratch.omissions.items[0].reason);
 }
 
+test "host instruction reads reserve only the host read bound" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    FakeInstructionHost.reset(&.{.{ .path = "/workspace/AGENTS.md", .content = "RULE" }});
+    defer FakeInstructionHost.reset(&.{});
+    var scratch = SelectionScratch{
+        .arena = arena_state.allocator(),
+        .work_budget = .{ .admitted_read_bytes = ReconstructionBudget.read_limit - 128 },
+    };
+    const unbounded_limit: context_limits.Resolved = .{ .value = .off, .source = .command_line };
+
+    const rule = (try loadRuleForSelection(
+        scratch.arena,
+        &scratch,
+        .{ .host = .{ .read_fn = FakeInstructionHost.read, .max_read_bytes = 64 } },
+        "/workspace/AGENTS.md",
+        unbounded_limit,
+    )) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("RULE", rule.body);
+    try std.testing.expectEqual(@as(usize, 64), FakeInstructionHost.last_max_bytes);
+    try std.testing.expectEqual(ReconstructionBudget.read_limit - 64, scratch.work_budget.?.admitted_read_bytes);
+}
+
 test "host instruction files load scoped rules for later targets" {
     const alloc = std.testing.allocator;
     FakeInstructionHost.reset(&.{
@@ -2060,40 +2085,49 @@ test "host instruction files load scoped rules for later targets" {
 
 test "host rule classification matches filesystem size and encoding rules" {
     const limit: context_limits.Resolved = .{ .value = .{ .bytes = 8 }, .source = .command_line };
-    const read_len = hostRuleReadLength(limit);
+    const unbounded = std.math.maxInt(usize);
     var buffer: [16]u8 = undefined;
     const Case = struct {
         bytes: []const u8,
         total_bytes: u64,
+        max_read_bytes: usize = std.math.maxInt(usize),
     };
     const classify = struct {
-        fn run(storage: []u8, case: Case, len: usize, rule_limit: context_limits.Resolved) RuleLoad {
+        fn run(storage: []u8, case: Case, rule_limit: context_limits.Resolved) RuleLoad {
             @memcpy(storage[0..case.bytes.len], case.bytes);
-            return classifyHostRule(.{ .bytes = storage[0..case.bytes.len], .total_bytes = case.total_bytes }, len, rule_limit);
+            return classifyHostRule(.{ .bytes = storage[0..case.bytes.len], .total_bytes = case.total_bytes }, rule_limit, case.max_read_bytes);
         }
     }.run;
 
-    switch (classify(&buffer, .{ .bytes = " rule \n", .total_bytes = 7 }, read_len, limit)) {
+    try std.testing.expectEqual(@as(usize, 11), hostReadLength(limit, unbounded));
+    switch (classify(&buffer, .{ .bytes = " rule \n", .total_bytes = 7 }, limit)) {
         .body => |body| {
             try std.testing.expectEqualStrings("rule", body.text);
             try std.testing.expectEqual(@as(usize, 7), body.observed_bytes);
         },
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(RuleLoad.blank, classify(&buffer, .{ .bytes = " \n\t", .total_bytes = 3 }, read_len, limit));
-    try std.testing.expectEqual(RuleLoad{ .omitted = .unreadable }, classify(&buffer, .{ .bytes = "ok\xff", .total_bytes = 3 }, read_len, limit));
+    try std.testing.expectEqual(RuleLoad.blank, classify(&buffer, .{ .bytes = " \n\t", .total_bytes = 3 }, limit));
+    try std.testing.expectEqual(RuleLoad{ .omitted = .unreadable }, classify(&buffer, .{ .bytes = "ok\xff", .total_bytes = 3 }, limit));
     // A truncated read may end inside one UTF-8 sequence.
-    switch (classify(&buffer, .{ .bytes = "line one\n\xe2\x82", .total_bytes = 40 }, read_len, limit)) {
+    switch (classify(&buffer, .{ .bytes = "line one\n\xe2\x82", .total_bytes = 40 }, limit)) {
         .body => |body| {
             try std.testing.expectEqualStrings("line one", body.text);
             try std.testing.expectEqual(@as(usize, 40), body.observed_bytes);
         },
         else => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(RuleLoad{ .omitted = .unreadable }, classify(&buffer, .{ .bytes = "line\xffone\n\xe2\x82", .total_bytes = 40 }, read_len, limit));
-    try std.testing.expectEqual(RuleLoad{ .omitted = .oversized }, classify(&buffer, .{ .bytes = "short", .total_bytes = 40 }, read_len, limit));
-    try std.testing.expectEqual(RuleLoad{ .omitted = .unreadable }, classify(&buffer, .{ .bytes = "rule", .total_bytes = 3 }, read_len, limit));
-    try std.testing.expectEqual(RuleLoad{ .omitted = .oversized }, classify(&buffer, .{ .bytes = "", .total_bytes = context_limits.emergency_ceiling_bytes + 1 }, read_len, limit));
+    try std.testing.expectEqual(RuleLoad{ .omitted = .unreadable }, classify(&buffer, .{ .bytes = "line\xffone\n\xe2\x82", .total_bytes = 40 }, limit));
+    // The reader must deliver exactly the requested prefix of the file.
+    try std.testing.expectEqual(RuleLoad{ .omitted = .unreadable }, classify(&buffer, .{ .bytes = "short", .total_bytes = 40 }, limit));
+    try std.testing.expectEqual(RuleLoad{ .omitted = .unreadable }, classify(&buffer, .{ .bytes = "rule", .total_bytes = 3 }, limit));
+    try std.testing.expectEqual(RuleLoad{ .omitted = .oversized }, classify(&buffer, .{ .bytes = "", .total_bytes = context_limits.emergency_ceiling_bytes + 1 }, limit));
+    // A host bound below the rule prefix omits larger files instead of truncating them.
+    try std.testing.expectEqual(RuleLoad{ .omitted = .oversized }, classify(&buffer, .{ .bytes = "line", .total_bytes = 40, .max_read_bytes = 4 }, limit));
+    switch (classify(&buffer, .{ .bytes = "rule", .total_bytes = 4, .max_read_bytes = 4 }, limit)) {
+        .body => |body| try std.testing.expectEqualStrings("rule", body.text),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "hosts without instruction files keep client omissions and skip home probes" {

@@ -76,7 +76,7 @@ pub const OmissionReason = enum {
 
 /// One project instruction file read through a host. `bytes` is owned by the
 /// allocator passed to `InstructionFileReader.read` and holds the first
-/// `@min(total_bytes, max_bytes)` bytes unless the host bounds reads lower.
+/// `@min(total_bytes, max_bytes)` bytes.
 pub const InstructionFile = struct {
     bytes: []u8,
     total_bytes: u64,
@@ -94,6 +94,8 @@ pub const InstructionFileError = Allocator.Error || error{
 /// Reads project instruction files (AGENTS.md) through an embedding host.
 pub const InstructionFileReader = struct {
     read_fn: *const fn (Allocator, path: []const u8, max_bytes: usize) InstructionFileError!?InstructionFile,
+    /// Largest prefix one read copies; callers never request more.
+    max_read_bytes: usize,
 
     /// Returns null when the file does not exist. The read may block on the host.
     pub fn read(self: InstructionFileReader, alloc: Allocator, path: []const u8, max_bytes: usize) InstructionFileError!?InstructionFile {

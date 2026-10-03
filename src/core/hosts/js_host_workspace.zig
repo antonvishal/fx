@@ -1,6 +1,7 @@
 const std = @import("std");
 const command_contract = @import("../execution/command_contract.zig");
 const context_contract = @import("../workspace/context_contract.zig");
+const debug_trace = @import("../shared/debug_trace.zig");
 const io_mod = @import("../shared/io.zig");
 
 const Allocator = std.mem.Allocator;
@@ -342,7 +343,8 @@ pub fn Adapter(comptime Host: type) type {
             const buffer = try alloc.alloc(u8, @min(max_bytes, max_instruction_file_bytes));
             errdefer alloc.free(buffer);
             var record: ReadRecord = undefined;
-            switch (Host.workspaceReadFile(path.ptr, path.len, buffer.ptr, buffer.len, &record)) {
+            const status = Host.workspaceReadFile(path.ptr, path.len, buffer.ptr, buffer.len, &record);
+            switch (status) {
                 0 => {},
                 -6 => {
                     alloc.free(buffer);
@@ -350,7 +352,11 @@ pub fn Adapter(comptime Host: type) type {
                 },
                 -2 => return error.HostUnreadable,
                 -4 => return error.UnsafePath,
-                else => return error.Unreadable,
+                else => {
+                    // Abort, deadline, host failure, and invalid UTF-8 all read as unreadable.
+                    debug_trace.logf("workspace", "instruction_read_failed status={d} path=\"{f}\"", .{ status, std.zig.fmtString(path) });
+                    return error.Unreadable;
+                },
             }
             const expected_bytes = @min(@as(u64, record.total_bytes), buffer.len);
             if (record.copied_bytes != expected_bytes) return error.Unreadable;
@@ -390,7 +396,10 @@ pub fn HostRuntime(comptime Host: type) type {
             if (!metadata.instruction_files) return .host_unreadable;
             return .{ .host = .{
                 .home = metadata.home(),
-                .reader = .{ .read_fn = Adapter(Host).readInstructionFile },
+                .reader = .{
+                    .read_fn = Adapter(Host).readInstructionFile,
+                    .max_read_bytes = max_instruction_file_bytes,
+                },
             } };
         }
     };

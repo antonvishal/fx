@@ -597,9 +597,10 @@ through the host `clipboard.writeText(text)` adapter and defaults to
 `navigator.clipboard`.
 
 A terminal with a `workspace` adapter loads AGENTS.md project instructions from
-it the way the CLI reads them from disk: `<root>/AGENTS.md`, scoped
-`AGENTS.md` files below the root, and `<home>/.fx/AGENTS.md`. Provide them
-through an optional `readFile` method:
+it the way the CLI reads them from disk: `<home>/.fx/AGENTS.md`,
+`<root>/AGENTS.md`, and, when `root` is below `home`, the `AGENTS.md` files in
+the directories between them. Provide them through an optional `readFile`
+method:
 
 ```js
 const workspace = {
@@ -607,7 +608,7 @@ const workspace = {
   permission: "allow-sandboxed",
   exec({ command, cwd, signal, timeoutMs, outputLimitBytes }) { /* run one command */ },
   async readFile({ path, signal }) {
-    // Return a string or UTF-8 bytes, or null when the file does not exist.
+    // Return a string, UTF-8 bytes (a Uint8Array or ArrayBuffer), or null when the file does not exist.
   },
 };
 ```
