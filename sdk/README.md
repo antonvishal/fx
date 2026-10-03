@@ -596,6 +596,28 @@ workspace stores remain terminal-only host integrations. Clipboard copy writes
 through the host `clipboard.writeText(text)` adapter and defaults to
 `navigator.clipboard`.
 
+A terminal with a `workspace` adapter loads AGENTS.md project instructions from
+it the way the CLI reads them from disk: `<root>/AGENTS.md`, scoped
+`AGENTS.md` files below the root, and `<home>/.fx/AGENTS.md`. Provide them
+through an optional `readFile` method:
+
+```js
+const workspace = {
+  info: { version: 1, root: "/workspace", cwd: "/workspace", home: "/home/visitor", gitAvailable: false, ephemeral: true },
+  permission: "allow-sandboxed",
+  exec({ command, cwd, signal, timeoutMs, outputLimitBytes }) { /* run one command */ },
+  async readFile({ path, signal }) {
+    // Return a string or UTF-8 bytes, or null when the file does not exist.
+  },
+};
+```
+
+fx calls `readFile` only for absolute `AGENTS.md` paths inside `root` or
+`home`. Each read has a 10-second deadline, the interrupt key aborts it through
+`signal`, and the CLI's project instruction size limits apply. Without
+`readFile`, fx tells the model that the workspace's project instructions were
+omitted and records the omission in the full transcript.
+
 During `/compact` and automatic compaction, the terminal shows a live
 `Compacting` activity row with elapsed time. Input and cancellation remain
 responsive while the summary request is pending. Compaction progress and

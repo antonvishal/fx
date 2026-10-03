@@ -914,9 +914,15 @@ pub fn Runtime(comptime App: type) type {
             app.context_snapshot.deinit(app.alloc);
             if (!app.context_enabled) return;
 
+            // Host workspaces own their root; AGENTS.md lives there, as for tools.
+            const host_workspace = appHostWorkspaceInfo(app);
+            const workspace_root = if (host_workspace) |info| info.root() else app.workspace_root;
             app.context_snapshot = app.contextRegistry().gatherDefaultSnapshot(app.alloc, .{
-                .workspace_root = app.workspace_root,
-                .access_scope = appAccessScope(app),
+                .workspace_root = workspace_root,
+                .access_scope = if (host_workspace != null)
+                    workspace_access.AccessScope.primaryOnly(workspace_root)
+                else
+                    appAccessScope(app),
                 .targets = targets,
                 .context_limits = if (comptime @hasField(App, "context_limits")) app.context_limits else .{},
             }) catch |err| {
@@ -1566,9 +1572,14 @@ const RefreshContextApp = struct {
     context_notice_tone: ?types.NoticeTone = null,
     context_notice_visibility: ?types.NoticeVisibility = null,
     session: session_runtime.SessionRuntime = .{ .max_history_turns = 8 },
+    host_info: ?js_host_workspace.Info = null,
 
     fn contextRegistry(self: *const RefreshContextApp) context_contract.Registry {
         return self.context_registry;
+    }
+
+    fn workspaceHostInfo(self: *const RefreshContextApp) ?*const js_host_workspace.Info {
+        return if (self.host_info) |*info| info else null;
     }
 
     fn deinit(self: *RefreshContextApp) void {
@@ -2518,6 +2529,38 @@ test "app agent runtime refreshes enabled project context through registry" {
     try std.testing.expectEqualStrings("fresh context notice", app.context_notices.items);
     try std.testing.expectEqual(types.NoticeTone.warning, app.context_notice_tone.?);
     try std.testing.expectEqual(types.NoticeVisibility.full_only, app.context_notice_visibility.?);
+}
+
+test "app agent runtime gathers project context from the host workspace root" {
+    const HostInfo = struct {
+        pub fn workspaceAvailable() i32 {
+            return 1;
+        }
+
+        pub fn workspaceInfo(out_ptr: [*]u8, out_cap: usize) i32 {
+            const json = "{\"version\":1,\"root\":\"/workspace\",\"cwd\":\"/workspace\",\"home\":\"/home/visitor\",\"git\":false,\"ephemeral\":true,\"permission\":\"allow-sandboxed\"}";
+            if (json.len > out_cap) return -3;
+            @memcpy(out_ptr[0..json.len], json);
+            return json.len;
+        }
+    };
+    const alloc = std.testing.allocator;
+    refresh_gather_calls = 0;
+    var app = RefreshContextApp{
+        .alloc = alloc,
+        .workspace_root = "/",
+        .context_enabled = true,
+        .context_snapshot = .{},
+        .context_registry = fresh_context_registry,
+        .host_info = try js_host_workspace.Adapter(HostInfo).loadInfo(alloc),
+    };
+    defer app.deinit();
+
+    try Runtime(RefreshContextApp).refreshProjectContext(&app, &.{});
+
+    try std.testing.expectEqual(@as(usize, 1), refresh_gather_calls);
+    const contribution = app.context_snapshot.contribution orelse return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings("fresh:/workspace", contribution.content);
 }
 
 test "app agent runtime clears disabled project context without gathering" {
