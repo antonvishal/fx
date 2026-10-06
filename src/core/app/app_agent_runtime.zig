@@ -1218,6 +1218,10 @@ pub fn Runtime(comptime App: type) type {
                 .skill_catalog = .{ .skills = skill_catalog.items, .diagnostics = skill_catalog.diagnostics },
                 .advertised_tool_names = child_projection.advertised_names,
                 .advertised_functions = child_projection.advertised_functions,
+                .web_selection = .{
+                    .search = if (comptime @hasField(App, "web_search")) app.web_search else .default,
+                    .fetch = if (comptime @hasField(App, "web_fetch")) app.web_fetch else .default,
+                },
                 .custom_tool_guidance = child_projection.custom_guidance,
                 .context_registry = app.contextRegistry(),
                 .context_enabled = if (comptime @hasField(App, "context_enabled")) app.context_enabled else true,

@@ -1639,14 +1639,21 @@ describe("cli: web", () => {
   test(
     "fx web --json returns the resolved search and fetch backends",
     async () => {
-      const r = await runFx(["web", "--json"]);
-      expect(r.code).toBe(0);
-      const json = JSON.parse(r.stdout.trim());
-      expect(json).toEqual({
-        kind: "web",
-        search: "exa",
-        fetch: "local",
-      });
+      const home = createIsolatedTestHome();
+      try {
+        const r = await runFx(["web", "--json"], {
+          env: { HOME: home, FX_WEB_SEARCH_BACKEND: undefined, FX_WEB_FETCH_BACKEND: undefined },
+        });
+        expect(r.code).toBe(0);
+        expect(r.stderr).toBe("");
+        expect(JSON.parse(r.stdout.trim())).toEqual({
+          kind: "web",
+          search: "exa",
+          fetch: "local",
+        });
+      } finally {
+        cleanupIsolatedTestHome(home);
+      }
     },
     TIMEOUT,
   );

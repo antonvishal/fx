@@ -1204,9 +1204,9 @@ pub fn providerToolsJson(alloc: Allocator, input: ProviderToolInput) ![]u8 {
             .{input.max_results},
         );
         if (hasValues(input.allowed_domains)) {
-            try writeExaDomains(&out.writer, "includeDomains", input.allowed_domains.?);
+            try write_search_domains(&out.writer, "includeDomains", input.allowed_domains.?);
         } else if (hasValues(input.blocked_domains)) {
-            try writeExaDomains(&out.writer, "excludeDomains", input.blocked_domains.?);
+            try write_search_domains(&out.writer, "excludeDomains", input.blocked_domains.?);
         }
         try out.writer.writeAll(",\"contents\":{\"highlights\":true}}}]");
     } else if (input.backend.eql(perplexity_search_backend_id)) {
@@ -1231,15 +1231,24 @@ pub fn providerToolsJson(alloc: Allocator, input: ProviderToolInput) ![]u8 {
             try writeParallelDomains(&out.writer, "excludeDomains", input.blocked_domains.?);
         }
         try out.writer.print(",\"excerpts\":{{\"maxCharsTotal\":{d}}}}}}}]", .{input.max_output_chars});
-    } else if (input.backend.eql(browserbase_search_backend_id) or input.backend.eql(tako_search_backend_id)) {
-        const backend = if (input.backend.eql(browserbase_search_backend_id))
-            web_tools.SearchBackend.browserbase
-        else
-            web_tools.SearchBackend.tako;
+    } else if (input.backend.eql(browserbase_search_backend_id)) {
+        const backend = web_tools.SearchBackend.browserbase;
         try out.writer.print(
             "[{{\"type\":\"provider\",\"id\":\"{s}\",\"name\":\"{s}\",\"args\":{{\"numResults\":{d}}}}}]",
             .{ backend.providerToolId(), backend.providerToolName(), input.max_results },
         );
+    } else if (input.backend.eql(tako_search_backend_id)) {
+        const backend = web_tools.SearchBackend.tako;
+        try out.writer.print(
+            "[{{\"type\":\"provider\",\"id\":\"{s}\",\"name\":\"{s}\",\"args\":{{\"sources\":{{\"data\":{{\"count\":{d}}},\"web\":{{\"count\":{d}",
+            .{ backend.providerToolId(), backend.providerToolName(), input.max_results, input.max_results },
+        );
+        if (hasValues(input.allowed_domains)) {
+            try write_search_domains(&out.writer, "includeDomains", input.allowed_domains.?);
+        } else if (hasValues(input.blocked_domains)) {
+            try write_search_domains(&out.writer, "excludeDomains", input.blocked_domains.?);
+        }
+        try out.writer.writeAll("}}}}]");
     } else {
         return error.InvalidWebSearchBackend;
     }
@@ -1498,7 +1507,7 @@ fn writePerplexityDomains(alloc: Allocator, writer: *std.Io.Writer, domains: []c
     try writer.writeByte(']');
 }
 
-fn writeExaDomains(writer: *std.Io.Writer, name: []const u8, domains: []const []const u8) !void {
+fn write_search_domains(writer: *std.Io.Writer, name: []const u8, domains: []const []const u8) !void {
     try writer.print(",\"{s}\":[", .{name});
     for (domains, 0..) |domain, index| {
         if (index > 0) try writer.writeByte(',');
@@ -1581,6 +1590,33 @@ test "gateway advertises Browserbase and Tako search backends" {
     defer alloc.free(tako);
     try std.testing.expect(std.mem.find(u8, tako, "gateway.tako_search") != null);
     try std.testing.expect(std.mem.find(u8, tako, "\"name\":\"tako_search\"") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, tako, .{});
+    defer parsed.deinit();
+    const args = parsed.value.array.items[0].object.get("args").?.object;
+    try std.testing.expect(args.get("numResults") == null);
+    const sources = args.get("sources").?.object;
+    try std.testing.expectEqual(@as(i64, 8), sources.get("web").?.object.get("count").?.integer);
+    try std.testing.expectEqual(@as(i64, 8), sources.get("data").?.object.get("count").?.integer);
+}
+
+test "Tako web source forwards domain filters" {
+    const alloc = std.testing.allocator;
+    for ([_]bool{ false, true }) |blocked| {
+        const domains = [_][]const u8{"example.com"};
+        const json = try providerToolsJson(alloc, .{
+            .backend = tako_search_backend_id,
+            .allowed_domains = if (blocked) null else &domains,
+            .blocked_domains = if (blocked) &domains else null,
+            .max_results = 5,
+            .max_output_chars = 4096,
+        });
+        defer alloc.free(json);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+        defer parsed.deinit();
+        const web = parsed.value.array.items[0].object.get("args").?.object.get("sources").?.object.get("web").?.object;
+        const key = if (blocked) "excludeDomains" else "includeDomains";
+        try std.testing.expectEqualStrings("example.com", web.get(key).?.array.items[0].string);
+    }
 }
 
 test "private exa worker preserves blocked domains" {

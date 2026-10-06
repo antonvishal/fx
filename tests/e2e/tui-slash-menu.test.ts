@@ -1634,6 +1634,45 @@ describe.skipIf(SKIP)("tui: slash menu", () => {
     TEST_TIMEOUT,
   );
 
+  test("web picker saves both backend selections", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "fx-web-picker-")));
+    workDirs.push(root);
+    const home = join(root, "home");
+    const workspace = join(root, "workspace");
+    const stderrPath = join(root, "stderr.log");
+    const settingsPath = join(home, ".fx", "settings.json");
+    mkdirSync(join(home, ".fx"), { recursive: true });
+    mkdirSync(workspace);
+    writeFileSync(settingsPath, "{}\n");
+    writeFileSync(stderrPath, "");
+    session = await TmuxSession.create({
+      cwd: workspace,
+      env: {
+        HOME: home,
+        AI_GATEWAY_API_KEY: undefined,
+        VERCEL_OIDC_TOKEN: undefined,
+        FX_WEB_SEARCH_BACKEND: undefined,
+        FX_WEB_FETCH_BACKEND: undefined,
+        FX_AUTO_UPGRADE: "0",
+      },
+      stderrPath,
+    });
+    await session.waitForComposer(10_000);
+    await session.sendText("/web");
+    await session.waitForText("perplexity", 5_000);
+    await session.sendKeys("Down");
+    await session.sendKeys("Enter");
+    await session.waitForPane((pane) => pane.includes("/web browserbase") && pane.includes("local"), 5_000);
+    await session.sendKeys("Down");
+    await session.sendKeys("Enter");
+    await session.waitForText("fetch set to browserbase", 5_000);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).web).toEqual({
+      search: "browserbase",
+      fetch: "browserbase",
+    });
+    expect(readFileSync(stderrPath, "utf8")).toBe("");
+  }, 20_000);
+
   test(
     "settings command opens the inline list and saves selected values",
     async () => {

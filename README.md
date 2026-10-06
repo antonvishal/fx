@@ -146,7 +146,7 @@ Slugs are the gateway's provider identifiers (letters, digits, dashes, for examp
 
 ## Web search and fetch
 
-`web_search` uses an AI Gateway search backend. The default is Exa. `web_fetch` uses a local HTTP fetch with domain allowlists, or AI Gateway Browserbase fetch. Browserbase fetch cannot honor local domain allowlists.
+`web_search` uses an AI Gateway search backend. The default is Exa. `web_fetch` uses a local HTTP fetch with domain allowlists, or AI Gateway Browserbase fetch. Browserbase fetch is unavailable when domain permission rules are configured because Gateway executes the request before fx can check its URL. Choose local fetch to enforce those rules. Full-access mode bypasses this restriction.
 
 Choose backends in the shell with `/web`, from Settings, or in profile settings. Project `.fx.json` cannot set these keys.
 
