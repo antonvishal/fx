@@ -2727,7 +2727,6 @@ fn expectTallPendingPromptReachesScrollback(rows: u16, preview_tail: usize) !voi
     try std.testing.expect(app.shell.transcript_commit_state == .stable);
     const preview = try rewritePublicationText(alloc, &physical, history.items);
     defer alloc.free(preview);
-    errdefer std.debug.print("rows={d} preview:\n{s}\n", .{ rows, preview });
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, preview, banner));
     try std.testing.expectEqual(preview_tail, std.mem.count(u8, preview, last_line));
 
