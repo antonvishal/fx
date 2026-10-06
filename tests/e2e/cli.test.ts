@@ -1635,6 +1635,23 @@ describe("cli: permissions", () => {
   );
 });
 
+describe("cli: web", () => {
+  test(
+    "fx web --json returns the resolved search and fetch backends",
+    async () => {
+      const r = await runFx(["web", "--json"]);
+      expect(r.code).toBe(0);
+      const json = JSON.parse(r.stdout.trim());
+      expect(json).toEqual({
+        kind: "web",
+        search: "exa",
+        fetch: "local",
+      });
+    },
+    TIMEOUT,
+  );
+});
+
 describe("cli: doctor", () => {
   test(
     "fx doctor --json returns valid doctor JSON",

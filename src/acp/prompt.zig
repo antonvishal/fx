@@ -873,6 +873,7 @@ pub fn handlePrompt(
         .permission_mode = captured_permission_mode,
         .permission_rules = session.permission_rules,
         .subagent_available = state.subagent_host != null,
+        .web_fetch_backend = state.web_fetch,
     });
     defer tool_projection.deinit(alloc);
 
@@ -1121,6 +1122,7 @@ pub fn runSubagentChild(
             .permission_mode = admission.permission_mode,
             .permission_rules = admission.rules,
             .subagent_available = true,
+            .web_fetch_backend = state.web_fetch,
         },
     ) catch return error.OutOfMemory;
     defer child_projection.deinit(alloc);
@@ -1241,6 +1243,8 @@ fn buildAgentConfig(
         .fast_mode = session.fast_mode,
         .ultrafast_mode = session.ultrafast_mode,
         .effort = session.effort,
+        .web_search_backend = state.web_search,
+        .web_fetch_backend = state.web_fetch,
         .first_call_tool_choice = session.first_call_tool_choice,
         .workspace_root = state.workspace_root,
         .access_scope = state.workspace_access.scope(state.workspace_root),

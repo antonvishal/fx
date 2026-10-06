@@ -4,6 +4,7 @@ const permissions = @import("../permissions/permissions.zig");
 const tool_dispatch = @import("tool_dispatch.zig");
 const tool_set_contract = @import("tool_set.zig");
 const types = @import("../shared/types.zig");
+const web_tools = @import("web_tools.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -11,6 +12,7 @@ pub const Options = struct {
     permission_mode: types.PermissionMode = .auto,
     permission_rules: types.PermissionRuleSet = .{},
     subagent_available: bool = false,
+    web_fetch_backend: web_tools.FetchBackend = .default,
 };
 
 const BuildKind = enum { full, read_only };
@@ -560,15 +562,18 @@ fn appendBuiltinTool(
     if (!includeBuiltinForKind(tool.name, kind, tool_set)) return;
     if (std.mem.eql(u8, tool.name, "subagent") and !options.subagent_available) return;
     if (std.mem.eql(u8, tool.name, "vision")) return;
+    const fetch_provider_executed = std.mem.eql(u8, tool.name, "web_fetch") and
+        options.web_fetch_backend.isProviderExecuted();
+    const provider_executed = tool.provider_executed or fetch_provider_executed;
     if (options.permission_mode != .yolo) {
-        if (tool.provider_executed and !providerExecutionIsAllowed(tool.name, options.permission_rules)) return;
+        if (provider_executed and !providerExecutionIsAllowed(tool.name, options.permission_rules)) return;
         if (permissions.rulesDenyAllTargetsForTool(options.permission_rules, tool.name)) return;
     }
     try advertised_names.append(alloc, tool.name);
-    if (!tool.provider_executed and tool.write_provider_advertisement_fn == null) {
+    if (!provider_executed and tool.write_provider_advertisement_fn == null) {
         try advertised_functions.append(alloc, tool.model_schema);
     }
-    if (tool.write_provider_advertisement_fn != null) {
+    if (tool.write_provider_advertisement_fn != null or fetch_provider_executed) {
         if (first_custom_guidance.*) {
             first_custom_guidance.* = false;
         } else {
