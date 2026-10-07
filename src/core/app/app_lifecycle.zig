@@ -1559,6 +1559,59 @@ fn loadPermissionMode(configured: ?PermissionMode) PermissionMode {
     return config_runtime.parsePermissionMode(mode) orelse fallback;
 }
 
+/// The permission mode startup would load now, including `FX_PERMISSION_MODE`.
+/// Long-running hosts read it when a session starts, so a mode saved by
+/// another fx process since startup applies. `home_dir` defaults to `HOME`.
+pub fn loadSavedPermissionMode(alloc: Allocator, home_dir: ?[]const u8, workspace_root: []const u8) !PermissionMode {
+    var paths = if (home_dir) |home|
+        try config_runtime.discoverPathsFromHome(alloc, home, workspace_root)
+    else
+        try config_runtime.discoverPaths(alloc, workspace_root);
+    defer paths.deinit(alloc);
+    var settings = try config_runtime.loadStartupStatusSettingsFromPaths(alloc, paths);
+    defer settings.deinit(alloc);
+    return loadPermissionMode(settings.permission_mode);
+}
+
+test "loadSavedPermissionMode reads the mode saved after startup" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    try tmp.dir.createDirPath(io_mod.getIo(), "workspace");
+    const home_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home_root);
+    const workspace_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "workspace");
+    defer alloc.free(workspace_root);
+
+    var env = try TestEnv.install(alloc, &.{.{ .key = "HOME", .value = home_root }});
+    defer env.deinit();
+    try std.testing.expectEqual(default_permission_mode, try loadSavedPermissionMode(alloc, null, workspace_root));
+
+    try writeFixtureFile(tmp.dir, "home/.fx/settings.json", "{\"permission_mode\":\"ask\"}\n");
+    try std.testing.expectEqual(PermissionMode.ask, try loadSavedPermissionMode(alloc, null, workspace_root));
+
+    try writeFixtureFile(tmp.dir, "home/.fx/settings.json", "{\"permission_mode\":\"yolo\"}\n");
+    try std.testing.expectEqual(PermissionMode.yolo, try loadSavedPermissionMode(alloc, home_root, workspace_root));
+}
+
+test "loadSavedPermissionMode keeps the FX_PERMISSION_MODE override" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io_mod.getIo(), "home/.fx");
+    const home_root = try io_mod.dirRealpathAlloc(alloc, tmp.dir, "home");
+    defer alloc.free(home_root);
+    try writeFixtureFile(tmp.dir, "home/.fx/settings.json", "{\"permission_mode\":\"yolo\"}\n");
+
+    var env = try TestEnv.install(alloc, &.{
+        .{ .key = "HOME", .value = home_root },
+        .{ .key = "FX_PERMISSION_MODE", .value = "ask" },
+    });
+    defer env.deinit();
+    try std.testing.expectEqual(PermissionMode.ask, try loadSavedPermissionMode(alloc, null, home_root));
+}
+
 fn loadAgentStepLimit(fallback: usize, configured: ?usize) usize {
     return agent_steps.resolveMaxAgentStepsWithOverride(
         configured,
