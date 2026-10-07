@@ -2921,11 +2921,11 @@ fn handleSetConfigOption(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Me
             if (!try dropUnsupportedSpeeds(state, alloc, msg, session)) return;
         }
     } else if (std.mem.eql(u8, config_id, "mode")) {
-        if (state.active_session) |*session| {
-            state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
-            defer state.subagent_authority_mutex.unlock(io_mod.getIo());
-            applySessionMode(state.cfg.mode_registry, session, value);
-        }
+        const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, .{
+            .code = ErrorCode.invalid_request,
+            .message = "No active session",
+        });
+        if (!try selectSessionMode(state, alloc, msg, session, value)) return;
     } else if (std.mem.eql(u8, config_id, "ultrafast")) {
         const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, .{
             .code = ErrorCode.invalid_request,
@@ -3440,25 +3440,102 @@ fn handleSetMode(state: *ServerState, alloc: Allocator, msg: *jsonrpc.Message) !
 
     if (!try requireParsedActiveSessionTarget(state, alloc, msg.id, parsed.value)) return;
 
-    if (parsed.value == .object) {
-        if (parsed.value.object.get("modeId")) |v| {
-            if (v == .string) {
-                if (state.active_session) |*session| {
-                    state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
-                    defer state.subagent_authority_mutex.unlock(io_mod.getIo());
-                    applySessionMode(state.cfg.mode_registry, session, v.string);
-                }
-            }
-        }
-    }
+    const mode_id = modeId: {
+        if (parsed.value != .object) break :modeId null;
+        const value = parsed.value.object.get("modeId") orelse break :modeId null;
+        break :modeId if (value == .string) value.string else null;
+    } orelse return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_params,
+        .message = "Missing modeId",
+    });
+    const session = if (state.active_session) |*active| active else return state.writer.writeError(alloc, msg.id, .{
+        .code = ErrorCode.invalid_request,
+        .message = "No active session",
+    });
+    if (!try selectSessionMode(state, alloc, msg, session, mode_id)) return;
 
     try state.writer.writeResponse(alloc, msg.id, "null");
 }
 
-pub fn applySessionMode(registry: mode_registry.Registry, session: *ActiveSessionState, id: []const u8) void {
-    const mode = registry.lookup(id) orelse return;
+/// Switches the session to a registered mode. Returns null and leaves the
+/// session unchanged when `id` is not registered.
+pub fn applySessionMode(registry: mode_registry.Registry, session: *ActiveSessionState, id: []const u8) ?*const mode_registry.ModeSpec {
+    const mode = registry.lookup(id) orelse return null;
     session.mode = mode.id;
     session.permission_mode = mode.permission_mode;
+    return mode;
+}
+
+/// Applies a client's mode choice to the active session and saves it as the
+/// profile's permission mode, like the CLI's /permissions. Writes an error
+/// and returns false for a mode the registry does not list.
+fn selectSessionMode(
+    state: *ServerState,
+    alloc: Allocator,
+    msg: *jsonrpc.Message,
+    session: *ActiveSessionState,
+    id: []const u8,
+) !bool {
+    const applied = blk: {
+        state.subagent_authority_mutex.lockUncancelable(io_mod.getIo());
+        defer state.subagent_authority_mutex.unlock(io_mod.getIo());
+        break :blk applySessionMode(state.cfg.mode_registry, session, id);
+    };
+    const mode = applied orelse {
+        try state.writer.writeError(alloc, msg.id, .{ .code = ErrorCode.invalid_params, .message = "Unknown mode" });
+        return false;
+    };
+    saveSessionPermissionMode(state, alloc, mode.permission_mode);
+    return true;
+}
+
+/// Saves a chosen permission mode to the profile so new sessions, here and
+/// in other fx processes, start in it. Hosts without a profile keep it for
+/// this process only.
+fn saveSessionPermissionMode(state: *ServerState, alloc: Allocator, mode: types.PermissionMode) void {
+    state.permission_mode = mode;
+    if (comptime !host_target.is_wasm) {
+        if (state.cfg.minimal_kernel) return;
+        const label = permissions.permissionModeLabel(mode);
+        const home = state.cfg.home_override orelse io_mod.getenv("HOME") orelse {
+            debug_trace.logf("acp", "permission_mode_save_failed mode={s} err=HomeNotSet", .{label});
+            return;
+        };
+        var attempt = config_runtime.attemptUserPreferencesInHome(alloc, home, .{ .permission_mode = mode });
+        defer attempt.deinit(alloc);
+        switch (attempt) {
+            .outcome => |outcome| debug_trace.logf("acp", "permission_mode_saved mode={s} outcome={s}", .{ label, @tagName(outcome) }),
+            .failure => |failure| debug_trace.logf("acp", "permission_mode_save_failed mode={s} err={s}", .{ label, @errorName(failure.err) }),
+        }
+    }
+}
+
+/// The mode a session starts in and the permission mode it enforces.
+pub const StartingMode = struct {
+    id: []const u8,
+    permission_mode: types.PermissionMode,
+};
+
+/// Reads the saved permission mode as it is now, so a running process
+/// follows a mode another fx process saved, and returns the registered mode
+/// that applies it, or the default mode when none does.
+pub fn loadStartingMode(state: *ServerState, alloc: Allocator) StartingMode {
+    if (comptime !host_target.is_wasm) {
+        if (!state.cfg.minimal_kernel and state.workspace_root.len > 0) {
+            if (app_lifecycle.loadSavedPermissionMode(alloc, state.cfg.home_override, state.workspace_root)) |saved| {
+                state.permission_mode = saved;
+            } else |err| {
+                debug_trace.logf("acp", "permission_mode_reload_failed kept={s} err={s}", .{
+                    permissions.permissionModeLabel(state.permission_mode),
+                    @errorName(err),
+                });
+            }
+        }
+    }
+    const registry = state.cfg.mode_registry;
+    const mode = registry.forPermission(state.permission_mode) orelse
+        return .{ .id = registry.default_mode_id, .permission_mode = state.permission_mode };
+    return .{ .id = mode.id, .permission_mode = mode.permission_mode };
 }
 
 test "applySessionMode uses registered mode policy and ignores unknown modes" {
@@ -3488,21 +3565,21 @@ test "applySessionMode uses registered mode policy and ignores unknown modes" {
         .pending_prompt_id = null,
     };
 
-    applySessionMode(registry, &session, "apply");
+    try std.testing.expectEqualStrings("apply", applySessionMode(registry, &session, "apply").?.id);
     try std.testing.expectEqualStrings("apply", session.mode);
     try std.testing.expectEqual(types.PermissionMode.auto, session.permission_mode);
 
-    applySessionMode(registry, &session, "inspect");
+    _ = applySessionMode(registry, &session, "inspect");
     try std.testing.expectEqualStrings("inspect", session.mode);
     try std.testing.expectEqual(types.PermissionMode.ask, session.permission_mode);
 
-    applySessionMode(registry, &session, "unknown");
+    try std.testing.expect(applySessionMode(registry, &session, "unknown") == null);
     try std.testing.expectEqualStrings("inspect", session.mode);
     try std.testing.expectEqual(types.PermissionMode.ask, session.permission_mode);
 
-    applySessionMode(registry, &session, "apply");
+    _ = applySessionMode(registry, &session, "apply");
     try std.testing.expectEqual(types.PermissionMode.auto, session.permission_mode);
-    applySessionMode(registry, &session, "inspect");
+    _ = applySessionMode(registry, &session, "inspect");
     try std.testing.expectEqual(types.PermissionMode.ask, session.permission_mode);
 }
 
