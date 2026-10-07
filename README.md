@@ -61,7 +61,7 @@ Inside the shell, run `/help` to browse interactive commands.
 In tmux, use your usual prefix bindings to switch sessions or enter copy mode.
 fx preserves those tmux views while resizing, including when the switcher zooms a split pane.
 
-The interactive shell reports its state with the [Program Status Protocol (OSC 7501)](https://www.superlogical.com/rex/docs/build/program-status), so a terminal that supports it can show when fx is working, waiting for your approval or answer, done, or stopped by an error. Approval and question reports include the request or question text. fx clears its status when it exits or is suspended, and terminals without support ignore the reports.
+The interactive shell reports its state with the [Program Status Protocol (OSC 7501)](https://www.superlogical.com/rex/docs/build/program-status), so a terminal that supports it can show when fx is working, waiting for your approval or answer, done, or stopped by an error. Approval and question reports include the request or question text. When fx exits or is suspended, it clears the terminal's status records. Terminals without support ignore the reports.
 
 ## Images
 

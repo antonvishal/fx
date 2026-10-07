@@ -61,10 +61,11 @@ pub const Reporter = struct {
     pub fn noteTurnFinished(self: *Reporter, outcome: types.TurnPresentationOutcome) void {
         self.settle(switch (outcome) {
             .completed => .done,
-            // A paused turn stopped after its provider retries ran out.
-            .failed, .paused => .@"error",
-            // The protocol reports a cancelled program as idle.
-            .interrupted => .idle,
+            .failed => .@"error",
+            // A cancelled or paused turn, usually paused by the user during a
+            // recovery, waits for the next instruction. The protocol reports
+            // that as idle.
+            .interrupted, .paused => .idle,
         });
     }
 
@@ -235,7 +236,12 @@ test "program status follows a turn from idle to its outcome" {
     try expectReport(&reporter, .settled, "\x1b]7501;state=idle:app=fx\x1b\\");
 
     reporter.noteTurnStarted();
+    try expectReport(&reporter, .working, "\x1b]7501;state=working:app=fx\x1b\\");
     reporter.noteTurnFinished(.paused);
+    try expectReport(&reporter, .settled, "\x1b]7501;state=idle:app=fx\x1b\\");
+
+    reporter.noteTurnStarted();
+    reporter.noteTurnFinished(.failed);
     try expectReport(&reporter, .settled, "\x1b]7501;state=error:app=fx\x1b\\");
     // A second failure in a row is reported again.
     reporter.noteTurnStarted();

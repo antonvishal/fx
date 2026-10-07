@@ -2154,8 +2154,8 @@ test "core.app_worker_runtime program status follows decision prompts to the tur
         "\x1b]7501;state=working:app=fx\x1b\\\x1b]7501;state=error:app=fx\x1b\\",
     );
 
-    // A confirmation outside a turn, such as `/permissions remember`, does
-    // not bring the reported error back once it closes.
+    // An approval prompt that opens outside a turn does not bring the
+    // reported error back once it closes.
     app.worker.pending_permission_request = .{ .label = "Remember allow for this saved session" };
     try tickNoop(&app);
     app.worker.pending_permission_request = null;
