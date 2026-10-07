@@ -22,6 +22,7 @@ const render_input = @import("../../ui/footer/render_input.zig");
 const interaction_state = @import("../../ui/footer/interaction_state.zig");
 const render_request = @import("../../ui/render_request.zig");
 const transcript_runtime = @import("../../ui/transcript/runtime.zig");
+const program_status = @import("../../ui/terminal/program_status.zig");
 
 const WorkerEvent = worker_runtime.WorkerEvent;
 const InputRuntime = core_input_runtime.Runtime;
@@ -809,6 +810,44 @@ pub fn Runtime(comptime App: type) type {
             // Waiting on an approval or question is not thinking: freeze the
             // elapsed clock for the duration of the wait.
             activity_status.syncWaitingClock(&app.stream, modal_active, io_mod.milliTimestamp());
+
+            if (comptime @hasField(App, "program_status")) {
+                reportProgramStatus(app, !cancellation_stops_turn and
+                    (app.stream.active or snapshot.processing or snapshot.queued_count > 0));
+            }
+        }
+
+        /// Tells the terminal what the user would see: a decision prompt,
+        /// running work, or the result of the last turn.
+        fn reportProgramStatus(app: *App, busy: bool) void {
+            const activity: program_status.Activity = if (app.approval_prompt.isActive())
+                .{ .blocked = .{
+                    .kind = .permission,
+                    .message = if (app.approval_prompt.request) |*request| request.view().label else "",
+                } }
+            else if (app.question_prompt.isActive())
+                .{ .blocked = .{ .kind = .question, .message = activeQuestionText(app) } }
+            else if (busy)
+                .working
+            else
+                .settled;
+            const report = app.program_status.update(activity) orelse return;
+            debug_trace.logf("program_status", "report activity={s} settled={s}", .{
+                @tagName(activity),
+                @tagName(app.program_status.settled),
+            });
+            app.writeProgramStatus(report);
+        }
+
+        fn activeQuestionText(app: *const App) []const u8 {
+            if (comptime !@hasDecl(@TypeOf(app.question_prompt), "projection")) return "";
+            const projection = app.question_prompt.projection() orelse return "";
+            const entry = projection.current_entry orelse return "";
+            return entry.question;
+        }
+
+        fn noteTurnStarted(app: *App) void {
+            if (comptime @hasField(App, "program_status")) app.program_status.noteTurnStarted();
         }
 
         fn activeToolStatusCount(
@@ -980,6 +1019,7 @@ pub fn Runtime(comptime App: type) type {
                             break :events;
                         }
                         resetStream(app, true);
+                        noteTurnStarted(app);
                         app.stream.active = true;
                         app.stream.turn_started_ms = io_mod.milliTimestamp();
                         app.shell.render_requests.request(.footer);
@@ -992,6 +1032,7 @@ pub fn Runtime(comptime App: type) type {
                             break :events;
                         }
                         resetStream(app, true);
+                        noteTurnStarted(app);
                         app.stream.active = true;
                         app.stream.turn_started_ms = io_mod.milliTimestamp();
                         app.shell.render_requests.request(.footer);
@@ -1008,6 +1049,7 @@ pub fn Runtime(comptime App: type) type {
                             break :events;
                         }
                         resetStream(app, true);
+                        noteTurnStarted(app);
                         app.stream.active = true;
                         app.stream.turn_started_ms = io_mod.milliTimestamp();
                         app.shell.render_requests.request(.footer);
@@ -1223,6 +1265,9 @@ pub fn Runtime(comptime App: type) type {
                             break :events;
                         }
                         resetStream(app, false);
+                        if (comptime @hasField(App, "program_status")) {
+                            if (notice.tone == .@"error") app.program_status.noteFailure();
+                        }
                         app.shell.render_requests.request(.footer);
                         try handlers.error_text(handlers.ctx, notice);
                     },
@@ -1298,6 +1343,9 @@ pub fn Runtime(comptime App: type) type {
                 app.alloc,
                 lifecycle,
             );
+            if (comptime @hasField(App, "program_status")) {
+                if (lifecycle == .turn_finished) app.program_status.noteTurnFinished(lifecycle.turn_finished.outcome);
+            }
             if (transition.applied_activity_kind) |kind| {
                 applyToolActivity(&app.stream, kind);
             }
@@ -1917,6 +1965,8 @@ const FakeApp = struct {
     last_attention_kind: ?@import("../hooks/hooks.zig").AttentionKind = null,
     persisted_finishes: std.ArrayList(types.FinishedPrompt) = .empty,
     finish_persistence_error: ?anyerror = null,
+    program_status: program_status.Reporter = .{},
+    program_status_reports: std.ArrayList(u8) = .empty,
 
     fn init(alloc: std.mem.Allocator) FakeApp {
         return .{ .alloc = alloc };
@@ -1925,6 +1975,7 @@ const FakeApp = struct {
     fn deinit(self: *FakeApp) void {
         for (self.persisted_finishes.items) |finished| types.freeFinishedPrompt(self.alloc, finished);
         self.persisted_finishes.deinit(self.alloc);
+        self.program_status_reports.deinit(self.alloc);
         self.session_persistence.deinit(self.alloc);
         self.worker.deinit();
         self.approval_prompt.deinit(self.alloc);
@@ -2005,7 +2056,72 @@ const FakeApp = struct {
         self.last_attention_turn_id = turn_id;
         self.last_attention_kind = kind;
     }
+
+    fn writeProgramStatus(self: *FakeApp, report: []const u8) void {
+        self.program_status_reports.appendSlice(self.alloc, report) catch @panic("program status capture failed");
+    }
+
+    fn takeProgramStatusReports(self: *FakeApp) []u8 {
+        return self.program_status_reports.toOwnedSlice(self.alloc) catch @panic("program status capture failed");
+    }
 };
+
+fn expectProgramStatusReports(app: *FakeApp, expected: []const u8) !void {
+    const reports = app.takeProgramStatusReports();
+    defer app.alloc.free(reports);
+    try std.testing.expectEqualStrings(expected, reports);
+}
+
+test "core.app_worker_runtime program status follows decision prompts to the turn result" {
+    var app = FakeApp.init(std.testing.allocator);
+    defer app.deinit();
+
+    try tickNoop(&app);
+    try expectProgramStatusReports(&app, "\x1b]7501;state=idle:app=fx\x1b\\");
+
+    app.worker.processing = true;
+    try app.worker.pushEvent(std.heap.c_allocator, .{ .begin_prompt = .{ .text = @constCast("push it") } });
+    try tickNoop(&app);
+    try expectProgramStatusReports(&app, "\x1b]7501;state=working:app=fx\x1b\\");
+
+    app.worker.pending_permission_request = .{ .label = "shell.run git push" };
+    try tickNoop(&app);
+    try tickNoop(&app);
+    try expectProgramStatusReports(
+        &app,
+        "\x1b]7501;state=blocked:kind=permission:app=fx:msg=c2hlbGwucnVuIGdpdCBwdXNo\x1b\\",
+    );
+
+    app.worker.pending_permission_request = null;
+    app.worker.pending_question = true;
+    try app.worker.pushEvent(std.heap.c_allocator, .question_requested);
+    try tickNoop(&app);
+    try expectProgramStatusReports(&app, "\x1b]7501;state=blocked:kind=question:app=fx\x1b\\");
+
+    app.worker.pending_question = false;
+    try tickNoop(&app);
+    try expectProgramStatusReports(&app, "\x1b]7501;state=working:app=fx\x1b\\");
+
+    try queueTurnFinished(&app, 1, .completed);
+    app.worker.processing = false;
+    try tickNoop(&app);
+    try expectProgramStatusReports(&app, "\x1b]7501;state=done:app=fx\x1b\\");
+
+    app.worker.processing = true;
+    try app.worker.pushEvent(std.heap.c_allocator, .{ .begin_prompt = .{ .text = @constCast("again") } });
+    try tickNoop(&app);
+    try app.worker.pushEvent(std.heap.c_allocator, .{ .error_text = .{
+        .topic = "system",
+        .tone = .@"error",
+        .body = "request failed: ConnectionRefused",
+    } });
+    app.worker.processing = false;
+    try tickNoop(&app);
+    try expectProgramStatusReports(
+        &app,
+        "\x1b]7501;state=working:app=fx\x1b\\\x1b]7501;state=error:app=fx\x1b\\",
+    );
+}
 
 const NoopBridge = struct {
     fn user(_: *anyopaque, _: types.UserTurn) !void {}
