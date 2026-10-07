@@ -340,6 +340,8 @@ pub const StartupStatus = struct {
     selected_model: []const u8,
     owned_selected_model: ?[]u8 = null,
     model_origin: ModelOrigin = .default,
+    /// The reasoning effort a new session starts with, as `StartupState` resolves it.
+    effort: types.ReasoningEffort = .auto,
     ultrafast_mode: bool = false,
     auth: auth_runtime.StatusSnapshot = .{},
     permission_mode: PermissionMode,
@@ -569,6 +571,7 @@ pub fn loadStartupStatusWithAuthMode(
         .selected_model = selected_model.value,
         .owned_selected_model = selected_model.owned,
         .model_origin = ModelOrigin.of(settings, configured_selection.provider, run_model),
+        .effort = settings.effort orelse .auto,
         .ultrafast_mode = detailed.ultrafast_mode_env_override orelse (settings.ultrafast_mode orelse false),
         .auth = auth_status,
         .permission_mode = loadPermissionMode(settings.permission_mode),

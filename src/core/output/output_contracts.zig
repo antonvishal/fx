@@ -471,6 +471,8 @@ pub const StatusSnapshot = struct {
     model: []const u8,
     /// Where startup found `model`: FX_MODEL, settings, or default.
     model_origin: ?[]const u8 = null,
+    /// The reasoning effort a new session starts with, when the caller resolved one.
+    effort: ?types.ReasoningEffort = null,
     provider_endpoint: ?[]const u8 = null,
     provider: model_provider.ProviderId = .gateway,
     update_channel: []const u8 = "stable",
@@ -502,6 +504,7 @@ pub const StatusSnapshot = struct {
 
         try out.writer.print("[status] model={s}\n", .{self.model});
         if (self.model_origin) |origin| try out.writer.print("[status] model_origin={s}\n", .{origin});
+        if (self.effort) |*effort| try out.writer.print("[status] effort={s}\n", .{effort.label()});
         if (self.provider != .gateway) {
             try out.writer.print("[status] model_source={s}\n", .{providerDisplayName(&self.provider)});
         }
@@ -607,6 +610,10 @@ pub const StatusSnapshot = struct {
         if (self.model_origin) |origin| {
             try writer.writeAll(",\"model_origin\":");
             try std.json.Stringify.value(origin, .{}, writer);
+        }
+        if (self.effort) |*effort| {
+            try writer.writeAll(",\"effort\":");
+            try std.json.Stringify.value(effort.label(), .{}, writer);
         }
         if (self.provider != .gateway) {
             try writer.writeAll(",\"model_source\":");
@@ -2064,6 +2071,32 @@ test "status reports where the model came from alongside the model" {
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
     try std.testing.expect(std.mem.startsWith(u8, json, "{\"kind\":\"status\",\"model\":\"gpt-5.4\",\"model_origin\":\"FX_MODEL\","));
+}
+
+test "status reports the effort a new session starts with after the model" {
+    const snapshot = StatusSnapshot{
+        .model = "anthropic/claude-opus-5.5",
+        .model_origin = "settings",
+        .effort = types.ReasoningEffort.literal("xhigh"),
+        .permission_mode = .auto,
+        .workspace_root = "/tmp/fx",
+        .history_turns = 0,
+        .session_permission_grants = 0,
+        .agent_step_limit = 24,
+    };
+    const text = try snapshot.renderText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.startsWith(u8, text, "[status] model=anthropic/claude-opus-5.5\n[status] model_origin=settings\n[status] effort=xhigh\n"));
+
+    const json = try snapshot.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    try std.testing.expect(std.mem.startsWith(u8, json, "{\"kind\":\"status\",\"model\":\"anthropic/claude-opus-5.5\",\"model_origin\":\"settings\",\"effort\":\"xhigh\","));
+
+    var unresolved = snapshot;
+    unresolved.effort = null;
+    const plain = try unresolved.renderJson(std.testing.allocator);
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.find(u8, plain, "effort") == null);
 }
 
 test "MCP config diagnostic renders in status text and JSON but not interactive body" {
