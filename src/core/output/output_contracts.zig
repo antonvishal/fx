@@ -2075,7 +2075,7 @@ test "status reports where the model came from alongside the model" {
 
 test "status reports the effort a new session starts with after the model" {
     const snapshot = StatusSnapshot{
-        .model = "anthropic/claude-opus-5.5",
+        .model = "provider/model",
         .model_origin = "settings",
         .effort = types.ReasoningEffort.literal("xhigh"),
         .permission_mode = .auto,
@@ -2086,11 +2086,11 @@ test "status reports the effort a new session starts with after the model" {
     };
     const text = try snapshot.renderText(std.testing.allocator);
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.startsWith(u8, text, "[status] model=anthropic/claude-opus-5.5\n[status] model_origin=settings\n[status] effort=xhigh\n"));
+    try std.testing.expect(std.mem.startsWith(u8, text, "[status] model=provider/model\n[status] model_origin=settings\n[status] effort=xhigh\n"));
 
     const json = try snapshot.renderJson(std.testing.allocator);
     defer std.testing.allocator.free(json);
-    try std.testing.expect(std.mem.startsWith(u8, json, "{\"kind\":\"status\",\"model\":\"anthropic/claude-opus-5.5\",\"model_origin\":\"settings\",\"effort\":\"xhigh\","));
+    try std.testing.expect(std.mem.startsWith(u8, json, "{\"kind\":\"status\",\"model\":\"provider/model\",\"model_origin\":\"settings\",\"effort\":\"xhigh\","));
 
     var unresolved = snapshot;
     unresolved.effort = null;
