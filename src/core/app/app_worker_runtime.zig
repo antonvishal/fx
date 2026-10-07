@@ -840,7 +840,6 @@ pub fn Runtime(comptime App: type) type {
         }
 
         fn activeQuestionText(app: *const App) []const u8 {
-            if (comptime !@hasDecl(@TypeOf(app.question_prompt), "projection")) return "";
             const projection = app.question_prompt.projection() orelse return "";
             const entry = projection.current_entry orelse return "";
             return entry.question;
@@ -1723,6 +1722,12 @@ const FakeQuestionPrompt = struct {
     activate_on_sync: bool = true,
     sync_count: usize = 0,
     clear_count: usize = 0,
+    question: []const u8 = "",
+
+    fn projection(self: *const FakeQuestionPrompt) ?struct { current_entry: ?struct { question: []const u8 } } {
+        if (!self.active) return null;
+        return .{ .current_entry = .{ .question = self.question } };
+    }
 
     fn syncFrom(self: *FakeQuestionPrompt, alloc: std.mem.Allocator, entries: anytype) !void {
         _ = alloc;
@@ -1967,6 +1972,7 @@ const FakeApp = struct {
     finish_persistence_error: ?anyerror = null,
     program_status: program_status.Reporter = .{},
     program_status_reports: std.ArrayList(u8) = .empty,
+    program_status_capture_failed: bool = false,
 
     fn init(alloc: std.mem.Allocator) FakeApp {
         return .{ .alloc = alloc };
@@ -2058,16 +2064,15 @@ const FakeApp = struct {
     }
 
     fn writeProgramStatus(self: *FakeApp, report: []const u8) void {
-        self.program_status_reports.appendSlice(self.alloc, report) catch @panic("program status capture failed");
-    }
-
-    fn takeProgramStatusReports(self: *FakeApp) []u8 {
-        return self.program_status_reports.toOwnedSlice(self.alloc) catch @panic("program status capture failed");
+        self.program_status_reports.appendSlice(self.alloc, report) catch {
+            self.program_status_capture_failed = true;
+        };
     }
 };
 
 fn expectProgramStatusReports(app: *FakeApp, expected: []const u8) !void {
-    const reports = app.takeProgramStatusReports();
+    try std.testing.expect(!app.program_status_capture_failed);
+    const reports = try app.program_status_reports.toOwnedSlice(app.alloc);
     defer app.alloc.free(reports);
     try std.testing.expectEqualStrings(expected, reports);
 }
@@ -2094,9 +2099,10 @@ test "core.app_worker_runtime program status follows decision prompts to the tur
 
     app.worker.pending_permission_request = null;
     app.worker.pending_question = true;
+    app.question_prompt.question = "Which branch?";
     try app.worker.pushEvent(std.heap.c_allocator, .question_requested);
     try tickNoop(&app);
-    try expectProgramStatusReports(&app, "\x1b]7501;state=blocked:kind=question:app=fx\x1b\\");
+    try expectProgramStatusReports(&app, "\x1b]7501;state=blocked:kind=question:app=fx:msg=V2hpY2ggYnJhbmNoPw==\x1b\\");
 
     app.worker.pending_question = false;
     try tickNoop(&app);
@@ -2106,6 +2112,17 @@ test "core.app_worker_runtime program status follows decision prompts to the tur
     app.worker.processing = false;
     try tickNoop(&app);
     try expectProgramStatusReports(&app, "\x1b]7501;state=done:app=fx\x1b\\");
+
+    // Work that starts no turn, such as `/compact`, settles as idle instead
+    // of reporting the earlier result again.
+    app.worker.processing = true;
+    try tickNoop(&app);
+    app.worker.processing = false;
+    try tickNoop(&app);
+    try expectProgramStatusReports(
+        &app,
+        "\x1b]7501;state=working:app=fx\x1b\\\x1b]7501;state=idle:app=fx\x1b\\",
+    );
 
     app.worker.processing = true;
     try app.worker.pushEvent(std.heap.c_allocator, .{ .begin_prompt = .{ .text = @constCast("again") } });
@@ -2120,6 +2137,18 @@ test "core.app_worker_runtime program status follows decision prompts to the tur
     try expectProgramStatusReports(
         &app,
         "\x1b]7501;state=working:app=fx\x1b\\\x1b]7501;state=error:app=fx\x1b\\",
+    );
+
+    // A confirmation outside a turn, such as `/permissions remember`, does
+    // not bring the reported error back once it closes.
+    app.worker.pending_permission_request = .{ .label = "Remember allow for this saved session" };
+    try tickNoop(&app);
+    app.worker.pending_permission_request = null;
+    try tickNoop(&app);
+    try expectProgramStatusReports(
+        &app,
+        "\x1b]7501;state=blocked:kind=permission:app=fx:msg=UmVtZW1iZXIgYWxsb3cgZm9yIHRoaXMgc2F2ZWQgc2Vzc2lvbg==\x1b\\" ++
+            "\x1b]7501;state=idle:app=fx\x1b\\",
     );
 }
 

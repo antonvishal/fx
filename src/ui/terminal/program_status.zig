@@ -6,10 +6,13 @@
 //! https://www.superlogical.com/rex/docs/build/program-status
 
 const std = @import("std");
+const debug_trace = @import("../../core/shared/debug_trace.zig");
 const text_utils = @import("../../core/shared/text_utils.zig");
 const types = @import("../../core/shared/types.zig");
 
-/// Removes every record fx reported. Written when fx exits or suspends.
+/// Removes every record on the terminal, not only fx's. fx reports on the
+/// root record while it owns the terminal, and writes this when it exits or
+/// suspends.
 pub const clear_sequence = prefix ++ "state=clear" ++ terminator;
 
 const prefix = "\x1b]7501;";
@@ -22,7 +25,7 @@ const max_report_bytes = prefix.len +
     "state=blocked:kind=permission:app=".len + app_name.len + ":msg=".len +
     base64.calcSize(max_message_bytes) + terminator.len;
 
-pub const BlockedKind = enum { permission, question };
+const BlockedKind = enum { permission, question };
 
 pub const Activity = union(enum) {
     /// Waiting on the user. `message` borrows untrusted text for this call
@@ -39,51 +42,69 @@ const Settled = enum { idle, done, @"error" };
 /// not written to the terminal again on every loop iteration.
 pub const Reporter = struct {
     settled: Settled = .idle,
+    /// Set once a settled report carried `settled`. Work that starts no turn,
+    /// such as `/compact`, then settles as idle instead of repeating a result
+    /// the user already saw.
+    settled_reported: bool = false,
     last: [max_report_bytes]u8 = undefined,
     last_len: usize = 0,
 
     /// A new turn must not report an earlier turn's result once it settles.
     pub fn noteTurnStarted(self: *Reporter) void {
-        self.settled = .idle;
+        self.settle(.idle);
     }
 
     pub fn noteTurnFinished(self: *Reporter, outcome: types.TurnPresentationOutcome) void {
-        self.settled = switch (outcome) {
+        self.settle(switch (outcome) {
             .completed => .done,
             // A paused turn stopped after its provider retries ran out.
             .failed, .paused => .@"error",
             // The protocol reports a cancelled program as idle.
             .interrupted => .idle,
-        };
+        });
     }
 
     /// Records a request failure that ended without a turn outcome.
     pub fn noteFailure(self: *Reporter) void {
-        self.settled = .@"error";
+        self.settle(.@"error");
     }
 
     /// Sends the next report even when it matches the last one, for example
-    /// after the terminal dropped fx's record while fx was suspended.
+    /// after the terminal dropped fx's record while fx was suspended. A
+    /// result that was already reported comes back as idle.
     pub fn invalidate(self: *Reporter) void {
         self.last_len = 0;
+        if (self.settled_reported) self.settle(.idle);
     }
 
     /// Returns the report to write when it differs from the last one. The
     /// slice borrows `self` until the next call.
     pub fn update(self: *Reporter, activity: Activity) ?[]const u8 {
+        switch (activity) {
+            .settled => self.settled_reported = true,
+            .working, .blocked => if (self.settled_reported) self.settle(.idle),
+        }
         var buffer: [max_report_bytes]u8 = undefined;
-        const report = encode(&buffer, activity, self.settled);
+        const report = encode(&buffer, activity, self.settled) orelse {
+            debug_trace.logf("program_status", "report dropped activity={s} reason=too_long", .{@tagName(activity)});
+            return null;
+        };
         if (std.mem.eql(u8, self.last[0..self.last_len], report)) return null;
         @memcpy(self.last[0..report.len], report);
         self.last_len = report.len;
         return self.last[0..self.last_len];
     }
+
+    fn settle(self: *Reporter, next: Settled) void {
+        self.settled = next;
+        self.settled_reported = false;
+    }
 };
 
-fn encode(buffer: *[max_report_bytes]u8, activity: Activity, settled: Settled) []const u8 {
+/// Returns null when the report does not fit `max_report_bytes`.
+fn encode(buffer: *[max_report_bytes]u8, activity: Activity, settled: Settled) ?[]const u8 {
     var writer: std.Io.Writer = .fixed(buffer);
-    // `max_report_bytes` covers the longest kind and a full message.
-    writeReport(&writer, activity, settled) catch unreachable;
+    writeReport(&writer, activity, settled) catch return null;
     return writer.buffered();
 }
 
@@ -206,6 +227,43 @@ test "program status writes only changed reports until invalidated" {
     try std.testing.expect(reporter.update(question) != null);
     try std.testing.expect(reporter.update(question) == null);
     try std.testing.expect(reporter.update(.{ .blocked = .{ .kind = .question, .message = "Second?" } }) != null);
+}
+
+test "program status does not repeat a result the user already saw" {
+    const idle = "\x1b]7501;state=idle:app=fx\x1b\\";
+    const working = "\x1b]7501;state=working:app=fx\x1b\\";
+    const done = "\x1b]7501;state=done:app=fx\x1b\\";
+    var reporter = Reporter{};
+
+    reporter.noteTurnStarted();
+    reporter.noteTurnFinished(.failed);
+    try expectReport(&reporter, .settled, "\x1b]7501;state=error:app=fx\x1b\\");
+    // `/compact` runs without starting a turn.
+    try expectReport(&reporter, .working, working);
+    try expectReport(&reporter, .settled, idle);
+
+    reporter.noteTurnStarted();
+    reporter.noteTurnFinished(.completed);
+    try expectReport(&reporter, .settled, done);
+    // `/permissions remember` asks for confirmation outside a turn.
+    try expectReport(&reporter, .{ .blocked = .{ .kind = .permission, .message = "" } }, "\x1b]7501;state=blocked:kind=permission:app=fx\x1b\\");
+    try expectReport(&reporter, .settled, idle);
+
+    reporter.noteTurnStarted();
+    reporter.noteTurnFinished(.completed);
+    try expectReport(&reporter, .settled, done);
+    reporter.invalidate();
+    try expectReport(&reporter, .settled, idle);
+}
+
+test "program status keeps an outcome noted before the turn was seen running" {
+    var reporter = Reporter{};
+    try expectReport(&reporter, .settled, "\x1b]7501;state=idle:app=fx\x1b\\");
+    // A turn can start and fail within one drain of worker events.
+    reporter.noteTurnStarted();
+    reporter.noteTurnFinished(.failed);
+    try expectReport(&reporter, .working, "\x1b]7501;state=working:app=fx\x1b\\");
+    try expectReport(&reporter, .settled, "\x1b]7501;state=error:app=fx\x1b\\");
 }
 
 test "program status messages are one bounded line without control characters" {
