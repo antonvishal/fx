@@ -6,6 +6,7 @@
 //! https://www.superlogical.com/rex/docs/build/program-status
 
 const std = @import("std");
+const compaction_activity = @import("../../core/output/compaction_activity.zig");
 const debug_trace = @import("../../core/shared/debug_trace.zig");
 const text_utils = @import("../../core/shared/text_utils.zig");
 const types = @import("../../core/shared/types.zig");
@@ -46,6 +47,9 @@ pub const Reporter = struct {
     /// such as `/compact`, then settles as idle instead of repeating a result
     /// the user already saw.
     settled_reported: bool = false,
+    /// The activity snapshot keeps a settled `/compact` until the footer
+    /// dismisses it, so each operation's result is noted once.
+    noted_compaction: ?compaction_activity.OperationId = null,
     last: [max_report_bytes]u8 = undefined,
     last_len: usize = 0,
 
@@ -69,6 +73,26 @@ pub const Reporter = struct {
         self.settle(.@"error");
     }
 
+    /// Records the result of a manual `/compact`, which runs without a turn.
+    /// Compaction inside a turn is part of that turn's outcome.
+    pub fn noteCompaction(self: *Reporter, snapshot: compaction_activity.Snapshot) void {
+        const operation = snapshot.operation orelse return;
+        if (operation.origin != .manual) return;
+        const feedback = switch (operation.phase) {
+            .terminal => |value| value,
+            .preparing, .running, .stopping => return,
+        };
+        if (self.noted_compaction == operation.id) return;
+        self.noted_compaction = operation.id;
+        switch (feedback.outcome) {
+            .succeeded => self.settle(.done),
+            .failed => self.settle(.@"error"),
+            .cancelled => self.settle(.idle),
+            // Nothing ran, so there is no result to report.
+            .no_op, .busy => {},
+        }
+    }
+
     /// Sends the next report even when it matches the last one, for example
     /// after the terminal dropped fx's record while fx was suspended. A
     /// result that was already reported comes back as idle.
@@ -80,8 +104,14 @@ pub const Reporter = struct {
     /// Returns the report to write when it differs from the last one. The
     /// slice borrows `self` until the next call.
     pub fn update(self: *Reporter, activity: Activity) ?[]const u8 {
+        // A new result is news even when it matches the last report, such as
+        // a second failure in a row.
+        var new_result = false;
         switch (activity) {
-            .settled => self.settled_reported = true,
+            .settled => {
+                new_result = !self.settled_reported and self.settled != .idle;
+                self.settled_reported = true;
+            },
             .working, .blocked => if (self.settled_reported) self.settle(.idle),
         }
         var buffer: [max_report_bytes]u8 = undefined;
@@ -89,7 +119,7 @@ pub const Reporter = struct {
             debug_trace.logf("program_status", "report dropped activity={s} reason=too_long", .{@tagName(activity)});
             return null;
         };
-        if (std.mem.eql(u8, self.last[0..self.last_len], report)) return null;
+        if (!new_result and std.mem.eql(u8, self.last[0..self.last_len], report)) return null;
         @memcpy(self.last[0..report.len], report);
         self.last_len = report.len;
         return self.last[0..self.last_len];
@@ -207,8 +237,10 @@ test "program status follows a turn from idle to its outcome" {
     reporter.noteTurnStarted();
     reporter.noteTurnFinished(.paused);
     try expectReport(&reporter, .settled, "\x1b]7501;state=error:app=fx\x1b\\");
+    // A second failure in a row is reported again.
     reporter.noteTurnStarted();
     reporter.noteTurnFinished(.failed);
+    try expectReport(&reporter, .settled, "\x1b]7501;state=error:app=fx\x1b\\");
     try std.testing.expect(reporter.update(.settled) == null);
     reporter.noteTurnStarted();
     try expectReport(&reporter, .settled, "\x1b]7501;state=idle:app=fx\x1b\\");
@@ -264,6 +296,37 @@ test "program status keeps an outcome noted before the turn was seen running" {
     reporter.noteTurnFinished(.failed);
     try expectReport(&reporter, .working, "\x1b]7501;state=working:app=fx\x1b\\");
     try expectReport(&reporter, .settled, "\x1b]7501;state=error:app=fx\x1b\\");
+}
+
+test "program status reports each manual compaction result once" {
+    const working = "\x1b]7501;state=working:app=fx\x1b\\";
+    var state = compaction_activity.State{};
+    var reporter = Reporter{};
+
+    const failed = state.begin(.manual, null, 0);
+    try expectReport(&reporter, .working, working);
+    state.settle(failed, compaction_activity.failure(error.ConnectionRefused, .summary, false), 1);
+    reporter.noteCompaction(state.snapshot);
+    try expectReport(&reporter, .settled, "\x1b]7501;state=error:app=fx\x1b\\");
+    // The snapshot keeps the failed operation after later work settles.
+    try expectReport(&reporter, .working, working);
+    reporter.noteCompaction(state.snapshot);
+    try expectReport(&reporter, .settled, "\x1b]7501;state=idle:app=fx\x1b\\");
+
+    const succeeded = state.begin(.manual, null, 2);
+    try expectReport(&reporter, .working, working);
+    state.settle(succeeded, .{ .outcome = .succeeded }, 3);
+    reporter.noteCompaction(state.snapshot);
+    try expectReport(&reporter, .settled, "\x1b]7501;state=done:app=fx\x1b\\");
+
+    // Compaction inside a turn belongs to that turn's outcome.
+    reporter.noteTurnStarted();
+    const automatic = state.begin(.automatic, 7, 4);
+    state.settle(automatic, compaction_activity.failure(error.ConnectionRefused, .summary, false), 5);
+    reporter.noteCompaction(state.snapshot);
+    reporter.noteTurnFinished(.completed);
+    try expectReport(&reporter, .working, working);
+    try expectReport(&reporter, .settled, "\x1b]7501;state=done:app=fx\x1b\\");
 }
 
 test "program status messages are one bounded line without control characters" {

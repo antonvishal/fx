@@ -820,6 +820,9 @@ pub fn Runtime(comptime App: type) type {
         /// Tells the terminal what the user would see: a decision prompt,
         /// running work, or the result of the last turn.
         fn reportProgramStatus(app: *App, busy: bool) void {
+            if (comptime @hasDecl(@TypeOf(app.worker), "compactionActivitySnapshot")) {
+                app.program_status.noteCompaction(app.worker.compactionActivitySnapshot());
+            }
             const activity: program_status.Activity = if (app.approval_prompt.isActive())
                 .{ .blocked = .{
                     .kind = .permission,
@@ -2113,7 +2116,7 @@ test "core.app_worker_runtime program status follows decision prompts to the tur
     try tickNoop(&app);
     try expectProgramStatusReports(&app, "\x1b]7501;state=done:app=fx\x1b\\");
 
-    // Work that starts no turn, such as `/compact`, settles as idle instead
+    // Work that starts no turn and reports no result settles as idle instead
     // of reporting the earlier result again.
     app.worker.processing = true;
     try tickNoop(&app);
@@ -2122,6 +2125,18 @@ test "core.app_worker_runtime program status follows decision prompts to the tur
     try expectProgramStatusReports(
         &app,
         "\x1b]7501;state=working:app=fx\x1b\\\x1b]7501;state=idle:app=fx\x1b\\",
+    );
+
+    // A failed `/compact` reports an error although no turn ran.
+    app.worker.processing = true;
+    const compaction = app.worker.compaction.begin(.manual, null, 0);
+    try tickNoop(&app);
+    app.worker.compaction.settle(compaction, @import("../output/compaction_activity.zig").failure(error.ConnectionRefused, .summary, false), 1);
+    app.worker.processing = false;
+    try tickNoop(&app);
+    try expectProgramStatusReports(
+        &app,
+        "\x1b]7501;state=working:app=fx\x1b\\\x1b]7501;state=error:app=fx\x1b\\",
     );
 
     app.worker.processing = true;
