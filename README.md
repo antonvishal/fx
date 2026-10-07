@@ -61,6 +61,8 @@ Inside the shell, run `/help` to browse interactive commands.
 In tmux, use your usual prefix bindings to switch sessions or enter copy mode.
 fx preserves those tmux views while resizing, including when the switcher zooms a split pane.
 
+The interactive shell reports its state with the [Program Status Protocol (OSC 7501)](https://www.superlogical.com/rex/docs/build/program-status), so a terminal that supports it can show when fx is working, waiting for your approval or answer, done, or stopped by an error. Approval and question reports include the request or question text. When fx exits or is suspended, it clears the terminal's status records. Terminals without support ignore the reports.
+
 ## Images
 
 Paste an image, attach one with `fx ask --image PATH`, or ask fx to `read_file` a PNG, JPEG, GIF, or WebP. File-backed attachments retain the original image. Before each model request, it checks the complete image count and sends only images that fit: at most 8000 pixels per side with 20 or fewer images, or 2000 pixels per side with more than 20. The encoded per-image limit is 5 MiB.
